@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.git/
+.claude/
+models/
+packages/
+*.docx
+*.odt
+P2E copy.py

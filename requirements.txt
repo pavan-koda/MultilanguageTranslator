@@ -1,0 +1,31 @@
+# Recommended runtime: Python 3.12 on Windows.
+# The current Argos Translate / SentencePiece stack is not compatible with Python 3.13+.
+Flask==3.0.0
+argostranslate==1.9.1
+# argostranslate pins sentencepiece==0.1.99 which has no py3.12 Windows wheel;
+# install argostranslate with --no-deps and use these instead:
+sentencepiece>=0.2.1
+ctranslate2==3.20.0
+stanza==1.1.1
+sacremoses==0.0.53
+packaging
+
+# torch 2.12+ wheels crash (DLL init failure) on this Broadwell Xeon; 2.4.1 works.
+torch==2.4.1
+
+# IndicTrans2 remote code needs transformers 4.x (uses transformers.onnx + torch_dtype).
+transformers==4.44.2
+sacrebleu
+# Current IndicTransToolkit release needs MSVC to build its Cython extension;
+# this commit is the last pure-Python version (install with --no-build-isolation
+# --no-deps after installing poetry-core and the indic_nlp_library below):
+# pip install git+https://github.com/VarunGumma/indic_nlp_library
+# pip install --no-build-isolation --no-deps git+https://github.com/VarunGumma/IndicTransToolkit@0c607654e8
+
+# 0.3.32 wheel uses CPU instructions this Xeon (Broadwell, no AVX-512) lacks →
+# 0xc000001d illegal instruction at model load. 0.3.19 is the newest prebuilt
+# wheel that works AND supports the gemma3 architecture (IndicTrans3 GGUF).
+# Install from: --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.3.19
+
+huggingface_hub

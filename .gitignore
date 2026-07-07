@@ -1,0 +1,11 @@
+/.claude
+/.venv
+/.venv312
+/venv
+/models
+/packages
+/llama.cpp
+__pycache__/
+*.pyc
+/*.exe
+/*.dll
