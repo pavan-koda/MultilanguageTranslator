@@ -1,5 +1,36 @@
 # How to Run — Setup Guide (16 GB RAM Machine)
 
+## Quick start (recommended)
+
+Copy the `translator/` folder to the target machine, install Python 3.10+
+(check "Add Python to PATH" during install), then run:
+
+```
+# Windows
+.\install.ps1
+
+# Linux / macOS
+./install.sh
+```
+
+This creates a venv, installs all dependencies, and installs
+`llama-cpp-python` with the best backend this machine supports — a real
+CUDA build if there's an NVIDIA GPU with a compatible prebuilt wheel
+(Linux), otherwise a CPU build known to work (see
+`scripts/install_llama_cpp.py` for the exact logic and why Windows GPUs
+currently fall back to CPU for the GGUF backend). Then run:
+
+```
+venv\Scripts\python.exe P2E.py     # Windows
+venv/bin/python P2E.py             # Linux / macOS
+```
+
+and open http://localhost:5000. The rest of this document is the manual,
+step-by-step version of the same process, useful for troubleshooting or
+understanding what the script does.
+
+---
+
 ## 1. Install Python
 
 Download and install **Python 3.10 or higher** from https://www.python.org/downloads/

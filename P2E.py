@@ -117,8 +117,31 @@ IT3_GGUF_DIR  = Path(__file__).parent / "models" / "it3_gguf"
 
 IT3_LANG_NAMES = {
     'en': 'English',
-    'hi': 'Hindi (hin_Deva)',
+    'hi': 'Hindi',
+    'mr': 'Marathi',
+    'gu': 'Gujarati',
+    'ta': 'Tamil',
+    'te': 'Telugu',
+    'bn': 'Bengali',
+    'pa': 'Punjabi',
 }
+
+# Unicode script block for each target language's validation check (below).
+# Gemma-3 (IT3's base model) is multilingual, so the GGUF backend can target any
+# of these — mr shares Devanagari with hi, so script alone can't tell them apart,
+# but it still catches the model answering in the wrong script entirely.
+IT3_SCRIPT_RANGES = {
+    'hi': ('ऀ', 'ॿ'),  # Devanagari
+    'mr': ('ऀ', 'ॿ'),  # Devanagari
+    'gu': ('઀', '૿'),  # Gujarati
+    'ta': ('஀', '௿'),  # Tamil
+    'te': ('ఀ', '౿'),  # Telugu
+    'bn': ('ঀ', '৿'),  # Bengali
+    'pa': ('਀', '੿'),  # Gurmukhi (Punjabi)
+}
+# Devanagari..Sinhala covers every script above — used to catch the model
+# hallucinating a *different* Indic script than the one actually requested.
+_INDIC_BLOCK = ('ऀ', '෿')
 
 
 # ── Backend selection ────────────────────────────────────────────────────────
@@ -242,6 +265,42 @@ def _download_gguf():
         return None
 
 
+_ggml_backends_loaded = False
+
+
+def _ensure_ggml_backends_loaded():
+    """Windows-only workaround for a llama-cpp-python packaging bug: llama.dll's
+    automatic ggml_backend_load_all() scan looks in the wrong directory (the
+    running python.exe's folder, not site-packages/llama_cpp/lib/), so the CPU
+    backend never gets registered and model loading fails with "no backends are
+    loaded" / "Failed to load model from file" — even though ggml-cpu.dll is
+    right there. This must run BEFORE llama_cpp is imported: importing it loads
+    llama.dll immediately (at module level), which appears to make its own
+    broken auto-scan attempt right away — a manual retry *after* that has
+    already happened does not undo it. So load ggml.dll ourselves and trigger
+    the scan with the correct path first; the backend registry is
+    process-global, so this only needs to run once, and llama_cpp's own later
+    load of the same ggml.dll (same path) reuses this already-loaded instance.
+    """
+    global _ggml_backends_loaded
+    if _ggml_backends_loaded or sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        import importlib.util
+        spec = importlib.util.find_spec('llama_cpp')
+        if not spec or not spec.submodule_search_locations:
+            return
+        lib_dir = Path(spec.submodule_search_locations[0]) / 'lib'
+        ggml = ctypes.WinDLL(str(lib_dir / 'ggml.dll'))
+        ggml.ggml_backend_load_all_from_path.argtypes = [ctypes.c_char_p]
+        ggml.ggml_backend_load_all_from_path.restype = None
+        ggml.ggml_backend_load_all_from_path(str(lib_dir).encode('utf-8'))
+        _ggml_backends_loaded = True
+    except Exception as e:
+        print(f"  Warning: manual ggml backend load failed ({e}); model load may fail.")
+
+
 def _load_it3_gguf():
     """Load IT3 as a GGUF model via llama-cpp-python. Works on CC 3.5+ (K2200 included)."""
     global _it3_gguf_model, _it3_gguf_loading, _it3_gguf_error
@@ -253,6 +312,7 @@ def _load_it3_gguf():
     _it3_gguf_error   = None
     try:
         try:
+            _ensure_ggml_backends_loaded()
             from llama_cpp import Llama
         except ImportError:
             raise RuntimeError(
@@ -343,7 +403,7 @@ _GGUF_TEMPLATE_RE = re.compile(
 )
 
 
-def _strip_gguf_artifacts(text):
+def _strip_gguf_artifacts(text, script_range=None):
     """Remove chat-template tokens and markdown that leak into GGUF raw output."""
     text = _GGUF_TEMPLATE_RE.sub('', text)
     # Remove any preamble before the actual translation — the model sometimes
@@ -358,13 +418,15 @@ def _strip_gguf_artifacts(text):
     text = _re.sub(r'^\s*\*\s+', '', text, flags=_re.MULTILINE)  # * bullet → plain
     # Remove leading numbered list lines that are meta-commentary (English sentences)
     lines = text.splitlines()
-    # Drop lines that are purely English meta-commentary (start with digit+dot or are ASCII-only planning)
+    # Drop lines before the target script first appears — those are English
+    # meta-commentary. For an English target this never matches, so the
+    # fallback below (unfiltered text) is used, which is what we want.
+    lo, hi = script_range or ('ऀ', 'ॿ')
     cleaned = []
     in_translation = False
     for line in lines:
         stripped = line.strip()
-        # Once we see a Devanagari character, we're in the translation
-        if any('ऀ' <= ch <= 'ॿ' for ch in stripped):
+        if any(lo <= ch <= hi for ch in stripped):
             in_translation = True
         if in_translation:
             cleaned.append(line)
@@ -372,8 +434,9 @@ def _strip_gguf_artifacts(text):
     return text.strip()
 
 
-def _translate_single_line_gguf(line, src_label, tgt_label, gloss_prefix):
-    """Translate one line using IT3's official prompt format.
+def _translate_chunk_gguf(chunk, src_label, tgt_label, gloss_prefix, to_lang):
+    """Translate one chunk (a paragraph, or a single line) using IT3's official
+    prompt format.
 
     Per ai4bharat's vllm-inference.py the model is trained on
     "Translate the following text to {Language}: {text}" inside Gemma-3 chat
@@ -384,7 +447,7 @@ def _translate_single_line_gguf(line, src_label, tgt_label, gloss_prefix):
     formatted = (
         f"<start_of_turn>user\n"
         f"{gloss_prefix}"
-        f"Translate the following text to {tgt_label}: {line}<end_of_turn>\n"
+        f"Translate the following text to {tgt_label}: {chunk}<end_of_turn>\n"
         f"<start_of_turn>model\n"
     )
     raw = _it3_gguf_model(
@@ -406,24 +469,25 @@ def _translate_single_line_gguf(line, src_label, tgt_label, gloss_prefix):
         out_lines[0],
     ):
         out_lines = out_lines[1:]
-    # Input is one line, so join any wrapped output back into one line.
+    # Input is a single paragraph, so join any wrapped output back into one block.
     joined = ' '.join(l.strip() for l in out_lines) if out_lines else output
-    result = _strip_gguf_artifacts(joined).strip()
+    script_range = IT3_SCRIPT_RANGES.get(to_lang)
+    result = _strip_gguf_artifacts(joined, script_range).strip()
 
-    # Validate: for en→hi at least 35% of alphabetic chars must be Devanagari.
-    # A simple "contains Devanagari" check passes partial translations like
+    # Validate: at least 35% of alphabetic chars must be in the target script.
+    # A simple "contains the script" check passes partial translations like
     # "⚠️चेतावनी  Indicates a hazardous situation..." which are still mostly English.
-    if tgt_label == 'Hindi':
+    if script_range:
+        lo, hi = script_range
         alpha_chars = [c for c in result if c.isalpha()]
         if not alpha_chars:
             return None
-        # Use strict Devanagari block only (U+0900–U+097F), excludes Bengali etc.
-        deva_ratio = sum(1 for c in alpha_chars if 'ऀ' <= c <= 'ॿ') / len(alpha_chars)
-        if deva_ratio < 0.35:
+        script_ratio = sum(1 for c in alpha_chars if lo <= c <= hi) / len(alpha_chars)
+        if script_ratio < 0.35:
             return None
-        # Reject if output contains any non-Devanagari Indic script (Bengali U+0980+,
-        # Tamil, Telugu etc.) — model sometimes hallucinates wrong scripts.
-        if any('ঀ' <= c <= '࿿' for c in result):
+        # Reject if output contains a *different* Indic script than the one
+        # requested — model sometimes hallucinates the wrong language's script.
+        if any(_INDIC_BLOCK[0] <= c <= _INDIC_BLOCK[1] and not (lo <= c <= hi) for c in result):
             return None
     else:
         ascii_alpha = sum(1 for c in result if c.isascii() and c.isalpha())
@@ -432,37 +496,62 @@ def _translate_single_line_gguf(line, src_label, tgt_label, gloss_prefix):
     return result
 
 
+def _split_into_paragraphs(text):
+    """Group consecutive non-blank lines into paragraphs (joined by spaces) so
+    wrapped lines — e.g. mid-sentence line breaks from PDF text extraction —
+    are translated together with full sentence context instead of line-by-line.
+    Blank lines are preserved as '' entries marking paragraph breaks.
+    """
+    blocks = []
+    current = []
+    for line in text.splitlines():
+        if line.strip():
+            current.append(line.strip())
+        else:
+            if current:
+                blocks.append(' '.join(current))
+                current = []
+            blocks.append('')
+    if current:
+        blocks.append(' '.join(current))
+    return blocks
+
+
+_TRANSLATE_ERROR_PREFIXES = ('Error:', 'IndicTrans2 error:', 'Translation error:')
+
+
 def _translate_with_it3_gguf(text, from_lang, to_lang):
-    """Translate via GGUF backend with per-line IT2 fallback for failed lines."""
+    """Translate via GGUF backend with per-paragraph IT2 fallback for failed chunks."""
     global _it3_gguf_model
     if _it3_gguf_model is None:
         if not _load_it3_gguf():
             return f"Error: could not load IT3 GGUF — {_it3_gguf_error}"
 
-    if from_lang == 'en' and to_lang == 'hi':
-        src_label, tgt_label = "English", "Hindi"
-    else:
-        src_label, tgt_label = "Hindi", "English"
-
+    src_label = IT3_LANG_NAMES.get(from_lang, from_lang)
+    tgt_label = IT3_LANG_NAMES.get(to_lang, to_lang)
     # No glossary in the prompt: IT3 only follows its exact trained format
     # ("Translate the following text to X: ..."), and any prepended glossary
     # makes it regurgitate the term list instead of translating. Glossary
     # terms are enforced afterwards by _fix_english_glossary_labels.
     gloss_prefix = ''
 
-    lines = text.splitlines()
-    translated_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            translated_lines.append('')
+    blocks = _split_into_paragraphs(text)
+    translated_blocks = []
+    for block in blocks:
+        if not block:
+            translated_blocks.append('')
             continue
-        result = _translate_single_line_gguf(stripped, src_label, tgt_label, gloss_prefix)
+        result = _translate_chunk_gguf(block, src_label, tgt_label, gloss_prefix, to_lang)
         if result is None:
+            # IT2/Argos only cover hi<->en, so for the other IT3 languages this
+            # fallback can't actually translate — detect that and keep the
+            # original text instead of leaking an "Error: ..." string into the doc.
             try:
-                result = _translate_core(stripped, from_lang, to_lang, engine='auto')
+                fallback = _translate_core(block, from_lang, to_lang, engine='auto')
             except Exception:
-                result = stripped
+                fallback = None
+            result = (fallback if fallback and not fallback.startswith(_TRANSLATE_ERROR_PREFIXES)
+                      else block)
         # Fix "English Label: Hindi content" — replace English label using glossary.
         # Group 1 captures any leading non-word chars (e.g. □ bullet symbol).
         if result and to_lang == 'hi':
@@ -478,8 +567,8 @@ def _translate_with_it3_gguf(text, from_lang, to_lang):
                                      if k.lower() == eng_label.lower()), None)
                 if hi_label:
                     result = f"{lead}{hi_label}: {rest}"
-        translated_lines.append(result)
-    return '\n'.join(translated_lines)
+        translated_blocks.append(result)
+    return '\n'.join(translated_blocks)
 
 
 # ── Unified entry point ──────────────────────────────────────────────────────
@@ -751,9 +840,6 @@ def initialize_translator():
     _rebuild_glossary()
 
     print("Initializing Argos Translate for Hindi...")
-    argostranslate.package.update_package_index()
-    available_packages = argostranslate.package.get_available_packages()
-
     required_pairs = [("hi", "en"), ("en", "hi")]
     installed_packages = argostranslate.package.get_installed_packages()
     installed_pairs = [(pkg.from_code, pkg.to_code) for pkg in installed_packages]
@@ -761,24 +847,39 @@ def initialize_translator():
     for from_code, to_code in required_pairs:
         if (from_code, to_code) in installed_pairs:
             print(f"{from_code}-{to_code} translation package already installed")
-            continue
-        package_to_install = next(
-            (pkg for pkg in available_packages if pkg.from_code == from_code and pkg.to_code == to_code),
-            None
-        )
-        if package_to_install:
-            print(f"Downloading {from_code}-{to_code} translation package...")
-            argostranslate.package.install_from_path(package_to_install.download())
-            print(f"Package {from_code}-{to_code} installed successfully!")
-        else:
-            print(f"{from_code}-{to_code} package not found in available packages")
+
+    missing_pairs = [p for p in required_pairs if p not in installed_pairs]
+    if missing_pairs:
+        # Only touch the network if a required package is actually missing —
+        # on an offline machine with the packages already bundled locally,
+        # this whole block is skipped so a DNS/network failure here can't
+        # crash startup before Flask even runs.
+        try:
+            argostranslate.package.update_package_index()
+            available_packages = argostranslate.package.get_available_packages()
+        except Exception as e:
+            print(f"Could not reach Argos package index (offline?): {e}")
+            available_packages = []
+
+        for from_code, to_code in missing_pairs:
+            package_to_install = next(
+                (pkg for pkg in available_packages if pkg.from_code == from_code and pkg.to_code == to_code),
+                None
+            )
+            if package_to_install:
+                print(f"Downloading {from_code}-{to_code} translation package...")
+                argostranslate.package.install_from_path(package_to_install.download())
+                print(f"Package {from_code}-{to_code} installed successfully!")
+            else:
+                print(f"{from_code}-{to_code} package not found in available packages")
 
     if not TRANSFORMERS_AVAILABLE:
         print("\nTransformers or Torch not installed. Skipping IndicTrans2 Hindi setup.")
         print("To enable Hindi, run: pip install transformers sentencepiece torch")
         return
 
-    if not hf_login():
+    offline = os.environ.get('HF_HUB_OFFLINE') == '1' or os.environ.get('TRANSFORMERS_OFFLINE') == '1'
+    if not offline and not hf_login():
         return
 
     print("Initializing IndicTrans2 for Hindi (this may take some time on first run)...")
@@ -1077,6 +1178,100 @@ def _deva_phonetic_to_en(word):
         i += 1
 
     return ''.join(out)
+
+
+GLOSSARY_LANGS = ['hi', 'mr', 'gu', 'ta', 'te', 'bn', 'pa']  # languages with glossary + <Tag> support
+
+# ── Cross-script transliteration for <Tag> phonetic sounding ────────────────
+# Devanagari, Gujarati, Bengali, Gurmukhi and Telugu share ISCII-aligned Unicode
+# block layouts, so most letters map 1:1 at a fixed offset from Devanagari.
+# Marathi reuses Devanagari directly. Tamil's letter inventory doesn't line up
+# (no separate voiced/aspirated consonants), so it gets its own explicit table.
+_INDIC_SCRIPT_OFFSET = {
+    'gu': 0x0A80 - 0x0900,
+    'bn': 0x0980 - 0x0900,
+    'pa': 0x0A00 - 0x0900,
+    'te': 0x0C00 - 0x0900,
+}
+# A handful of Devanagari characters have no offset-equivalent in the target
+# script (e.g. Bengali has no separate VA or LLA letter) — approximate instead.
+_INDIC_OFFSET_OVERRIDES = {
+    'bn': {'व': 'ব', 'ळ': 'ল'},
+    'pa': {'ष': 'ਸ਼', 'ऋ': 'ਰਿ', 'ृ': 'ਿ'},
+}
+
+_DEVA_TO_TAMIL = {
+    'क':'க','ख':'க','ग':'க','घ':'க','ङ':'ங',
+    'च':'ச','छ':'ச','ज':'ஜ','झ':'ஜ','ञ':'ஞ',
+    'ट':'ட','ठ':'ட','ड':'ட','ढ':'ட','ण':'ண',
+    'त':'த','थ':'த','द':'த','ध':'த','न':'ந',
+    'प':'ப','फ':'ப','ब':'ப','भ':'ப','म':'ம',
+    'य':'ய','र':'ர','ल':'ல','व':'வ',
+    'श':'ஷ','ष':'ஷ','स':'ஸ','ह':'ஹ','ळ':'ள',
+    'क़':'க','ख़':'க','ग़':'க','ज़':'ஜ','ड़':'ர','ढ़':'ர','फ़':'ப',
+    'ा':'ா','ि':'ி','ी':'ீ','ु':'ு','ू':'ூ','े':'ெ','ै':'ை','ो':'ொ','ौ':'ௌ',
+    'अ':'அ','आ':'ஆ','इ':'இ','ई':'ஈ','उ':'உ','ऊ':'ஊ','ए':'எ','ऐ':'ஐ','ओ':'ஒ','औ':'ஔ',
+    '्':'்', 'ं':'ங்', 'ँ':'', 'ः':'ஃ',
+}
+_TAMIL_TO_DEVA = {
+    'க':'क','ங':'ङ','ச':'च','ஞ':'ञ','ட':'ट','ண':'ण','த':'त','ந':'न',
+    'ப':'प','ம':'म','ய':'य','ர':'र','ல':'ल','வ':'व','ழ':'ल','ற':'र','ன':'न',
+    'ஷ':'ष','ஸ':'स','ஹ':'ह','ள':'ळ','ஜ':'ज',
+    'ா':'ा','ி':'ि','ீ':'ी','ு':'ु','ூ':'ू','ெ':'े','ை':'ै','ொ':'ो','ௌ':'ौ',
+    'அ':'अ','ஆ':'आ','இ':'इ','ஈ':'ई','உ':'उ','ஊ':'ऊ','எ':'ए','ஐ':'ऐ','ஒ':'ओ','ஔ':'औ',
+    '்':'्', 'ஃ':'ः',
+}
+
+
+def _transliterate_deva_to_script(text, lang):
+    """Convert Devanagari phonetic output to another Indic script."""
+    if lang in ('hi', 'mr'):
+        return text
+    if lang == 'ta':
+        return ''.join(_DEVA_TO_TAMIL.get(ch, ch) for ch in text)
+    offset = _INDIC_SCRIPT_OFFSET.get(lang)
+    if offset is None:
+        return text
+    overrides = _INDIC_OFFSET_OVERRIDES.get(lang, {})
+    out = []
+    for ch in text:
+        if ch in overrides:
+            out.append(overrides[ch])
+        elif 'ऀ' <= ch <= 'ॿ':
+            out.append(chr(ord(ch) + offset))
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def _transliterate_script_to_deva(text, lang):
+    """Convert another Indic script back to Devanagari (for reverse phonetic reading)."""
+    if lang in ('hi', 'mr'):
+        return text
+    if lang == 'ta':
+        return ''.join(_TAMIL_TO_DEVA.get(ch, ch) for ch in text)
+    offset = _INDIC_SCRIPT_OFFSET.get(lang)
+    if offset is None:
+        return text
+    reverse_overrides = {v: k for k, v in _INDIC_OFFSET_OVERRIDES.get(lang, {}).items()}
+    out = []
+    for ch in text:
+        if ch in reverse_overrides:
+            out.append(reverse_overrides[ch])
+        else:
+            code = ord(ch) - offset
+            out.append(chr(code) if 0x0900 <= code <= 0x097f else ch)
+    return ''.join(out)
+
+
+def _en_phonetic_to_script(word, lang):
+    """Phonetic English → target Indic script (loanword style), for any glossary language."""
+    return _transliterate_deva_to_script(_en_phonetic_to_deva(word), lang)
+
+
+def _script_phonetic_to_en(word, lang):
+    """Phonetic Indic-script → English sounding (reverse of above), for any glossary language."""
+    return _deva_phonetic_to_en(_transliterate_script_to_deva(word, lang))
 
 
 def _auto_add_tagged_terms(core, engine):
@@ -1411,8 +1606,9 @@ def translate():
 
         # IT3 is a large LLM — full inference overhead even for one word.
         # Fall back to IndicTrans2 for short text so the UI stays responsive.
+        # IndicTrans2 only covers hi<->en, so other IT3 languages must stay on IT3.
         fell_back = False
-        if engine == 'it3' and len(text.strip()) < IT3_MIN_CHARS:
+        if engine == 'it3' and {from_lang, to_lang} == {'hi', 'en'} and len(text.strip()) < IT3_MIN_CHARS:
             engine = 'indic'
             fell_back = True
 
@@ -1545,7 +1741,10 @@ def extract_pages(file, filename, use_ocr=False, ocr_lang='pol'):
         raise ValueError(f"Unsupported file type: .{ext}. Supported: TXT, PDF, DOCX")
 
 
-_LANG_TO_TESSDATA = {'en': 'eng', 'hi': 'hin'}
+_LANG_TO_TESSDATA = {
+    'en': 'eng', 'hi': 'hin', 'mr': 'mar', 'gu': 'guj',
+    'ta': 'tam', 'te': 'tel', 'bn': 'ben', 'pa': 'pan',
+}
 
 WNS = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
 # Fonts that render symbols/dingbats — their text should not be translated
@@ -1673,10 +1872,11 @@ def _docx_sse(file_bytes, from_lang, to_lang, engine):
                     # Prepend section heading so IT3 stays contextually consistent
                     context_src = f"[Section: {current_section}]\n{src}"
                     translated = translate_text(context_src, from_lang, to_lang, engine)
-                    # Strip the echoed context line if the model included it
-                    lines = translated.split('\n')
-                    if lines and lines[0].startswith('[') and ']' in lines[0]:
-                        translated = '\n'.join(lines[1:]).strip()
+                    # Strip the echoed section tag if the model included it — IT3
+                    # may return it as its own line, or inline if the context and
+                    # content got joined into one paragraph before translating.
+                    stripped = re.sub(r'^\s*\[[^\]]{0,120}\]\s*', '', translated, count=1).strip()
+                    translated = stripped or translated
                 else:
                     translated = translate_text(src, from_lang, to_lang, engine)
 
@@ -1701,7 +1901,9 @@ def _docx_sse(file_bytes, from_lang, to_lang, engine):
 
 
 def _plain_sse(file_bytes, filename, from_lang, to_lang, engine, use_ocr=False):
-    """SSE generator for PDF / TXT: streams one chunk per non-empty line."""
+    """SSE generator for PDF / TXT: streams one chunk per non-empty line
+    (or per paragraph for IT3, which benefits from full-sentence context —
+    PDF text extraction wraps lines mid-sentence, not at paragraph breaks)."""
     try:
         ocr_lang = _LANG_TO_TESSDATA.get(from_lang, 'eng')
         pages = extract_pages(io.BytesIO(file_bytes), filename, use_ocr=use_ocr, ocr_lang=ocr_lang)
@@ -1709,29 +1911,37 @@ def _plain_sse(file_bytes, filename, from_lang, to_lang, engine, use_ocr=False):
             yield f"data: {json.dumps({'error': 'No text found in document'})}\n\n"
             return
 
-        all_lines = [
-            line.strip()
-            for page_text in pages
-            for line in page_text.split('\n')
-            if line.strip()
-        ]
-        total = len(all_lines)
+        if engine == 'it3':
+            all_chunks = [
+                para
+                for page_text in pages
+                for para in _split_into_paragraphs(page_text)
+                if para
+            ]
+        else:
+            all_chunks = [
+                line.strip()
+                for page_text in pages
+                for line in page_text.split('\n')
+                if line.strip()
+            ]
+        total = len(all_chunks)
         yield f"data: {json.dumps({'total': total, 'status': 'start'})}\n\n"
 
-        for i, line in enumerate(all_lines):
-            # Keep-alive comment every 10 lines so the SSE connection doesn't time out
+        for i, chunk in enumerate(all_chunks):
+            # Keep-alive comment every 10 chunks so the SSE connection doesn't time out
             if i % 10 == 0:
                 yield ": keep-alive\n\n"
 
             try:
-                translated = translate_text(line, from_lang=from_lang, to_lang=to_lang, engine=engine)
-            except Exception as line_err:
-                # One bad line should not stop the whole document — skip it
-                translated = f"[ERROR: {line_err}]"
-                print(f"  Line {i+1} failed: {line_err}")
+                translated = translate_text(chunk, from_lang=from_lang, to_lang=to_lang, engine=engine)
+            except Exception as chunk_err:
+                # One bad chunk should not stop the whole document — skip it
+                translated = f"[ERROR: {chunk_err}]"
+                print(f"  Chunk {i+1} failed: {chunk_err}")
 
             progress = int((i + 1) / total * 100)
-            yield f"data: {json.dumps({'chunk': {'src': line, 'translated': translated}, 'index': i + 1, 'total': total, 'progress': progress})}\n\n"
+            yield f"data: {json.dumps({'chunk': {'src': chunk, 'translated': translated}, 'index': i + 1, 'total': total, 'progress': progress})}\n\n"
 
         yield f"data: {json.dumps({'complete': True})}\n\n"
     except Exception as e:
@@ -1804,9 +2014,10 @@ def build_docx():
     )
 
 
+print("Initializing translator...")
+initialize_translator()
+
 if __name__ == '__main__':
-    print("Initializing translator...")
-    initialize_translator()
     print("\nStarting Flask server...")
     print("Open your browser and go to: http://localhost:5000")
     app.run(debug=True, host='0.0.0.0', port=5000, use_reloader=False)

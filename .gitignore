@@ -5,6 +5,8 @@
 /models
 /packages
 /llama.cpp
+/offline_build
+/hf_cache
 __pycache__/
 *.pyc
 /*.exe

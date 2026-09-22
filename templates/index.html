@@ -954,12 +954,33 @@
     const engineOptions = {
         argosHindi: [{ value:'en-hi', label:'English → Hindi' }, { value:'hi-en', label:'Hindi → English' }],
         indic:      [{ value:'en-hi', label:'English → Hindi' }, { value:'hi-en', label:'Hindi → English' }],
-        it3:        [{ value:'en-hi', label:'English → Hindi' }, { value:'hi-en', label:'Hindi → English' }],
+        // IT3 (Gemma-3 based) is multilingual, so it also covers these Indic languages.
+        it3: [
+            { value:'en-hi', label:'English → Hindi' },    { value:'hi-en', label:'Hindi → English' },
+            { value:'en-mr', label:'English → Marathi' },  { value:'mr-en', label:'Marathi → English' },
+            { value:'en-gu', label:'English → Gujarati' }, { value:'gu-en', label:'Gujarati → English' },
+            { value:'en-ta', label:'English → Tamil' },    { value:'ta-en', label:'Tamil → English' },
+            { value:'en-te', label:'English → Telugu' },   { value:'te-en', label:'Telugu → English' },
+            { value:'en-bn', label:'English → Bengali' },  { value:'bn-en', label:'Bengali → English' },
+            { value:'en-pa', label:'English → Punjabi' },  { value:'pa-en', label:'Punjabi → English' },
+        ],
     };
 
     const panelMeta = {
-        'hi-en': { src:'Hindi',   tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Hindi...' },
-        'en-hi': { src:'English', tgt:'Hindi',   srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' }
+        'hi-en': { src:'Hindi',    tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Hindi...' },
+        'en-hi': { src:'English',  tgt:'Hindi',   srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' },
+        'mr-en': { src:'Marathi',  tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Marathi...' },
+        'en-mr': { src:'English',  tgt:'Marathi', srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' },
+        'gu-en': { src:'Gujarati', tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Gujarati...' },
+        'en-gu': { src:'English',  tgt:'Gujarati',srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' },
+        'ta-en': { src:'Tamil',    tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Tamil...' },
+        'en-ta': { src:'English',  tgt:'Tamil',   srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' },
+        'te-en': { src:'Telugu',   tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Telugu...' },
+        'en-te': { src:'English',  tgt:'Telugu',  srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' },
+        'bn-en': { src:'Bengali',  tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Bengali...' },
+        'en-bn': { src:'English',  tgt:'Bengali', srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' },
+        'pa-en': { src:'Punjabi',  tgt:'English', srcFlag:'🇮🇳', tgtFlag:'🇬🇧', ph:'Enter text in Punjabi...' },
+        'en-pa': { src:'English',  tgt:'Punjabi', srcFlag:'🇬🇧', tgtFlag:'🇮🇳', ph:'Enter text in English...' },
     };
 
     function switchEngine(engine) {

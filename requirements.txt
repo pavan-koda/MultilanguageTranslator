@@ -1,14 +1,21 @@
 # Recommended runtime: Python 3.12 on Windows.
 # The current Argos Translate / SentencePiece stack is not compatible with Python 3.13+.
+# setuptools 82+ dropped the bundled pkg_resources module, which ctranslate2
+# still imports at startup -> ModuleNotFoundError. Pin below that.
+setuptools<82
 Flask==3.0.0
-argostranslate==1.9.1
-# argostranslate pins sentencepiece==0.1.99 which has no py3.12 Windows wheel;
-# install argostranslate with --no-deps and use these instead:
+# argostranslate is intentionally NOT listed here: it pins sentencepiece==0.1.99,
+# which has no py3.12 Windows wheel and conflicts with the sentencepiece pin
+# below. install.ps1 / install.sh install it separately with --no-deps first:
+#   pip install --no-deps argostranslate==1.9.1
 sentencepiece>=0.2.1
-ctranslate2==3.20.0
+# 3.20.0's compiled .so requests an executable stack, which fails to load
+# under Docker/WSL2 with "cannot enable executable stack": use 4.6.1+ instead.
+ctranslate2==4.6.1
 stanza==1.1.1
 sacremoses==0.0.53
 packaging
+gunicorn
 
 # torch 2.12+ wheels crash (DLL init failure) on this Broadwell Xeon; 2.4.1 works.
 torch==2.4.1
@@ -22,10 +29,9 @@ sacrebleu
 # pip install git+https://github.com/VarunGumma/indic_nlp_library
 # pip install --no-build-isolation --no-deps git+https://github.com/VarunGumma/IndicTransToolkit@0c607654e8
 
-# 0.3.32 wheel uses CPU instructions this Xeon (Broadwell, no AVX-512) lacks →
-# 0xc000001d illegal instruction at model load. 0.3.19 is the newest prebuilt
-# wheel that works AND supports the gemma3 architecture (IndicTrans3 GGUF).
-# Install from: --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-llama-cpp-python==0.3.19
+# llama-cpp-python is intentionally NOT listed here: it needs a different
+# wheel per machine (CUDA build on a GPU Linux box, CPU-only on Windows —
+# see scripts/install_llama_cpp.py for why). Run that script (or install.ps1
+# / install.sh, which call it) to install the right build for this machine.
 
 huggingface_hub
